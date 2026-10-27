@@ -10,7 +10,7 @@
 
 | 格式 | 链接 | 适合 |
 |---|---|---|
-| **Markdown**（推荐） | [`D55-HeadUnit-Root-Manual.md`](./D55-HeadUnit-Root-Manual.md) | 直接在 GitHub 网页上阅读，可搜索、可跳转，手机上也能看 |
+| **Markdown**（推荐） | [`D55-HeadUnit-Root-Manual.md`]([./D55-HeadUnit-Root-Manual.md](https://github.com/hahawuyuzi/xpeng-d55-headunit-manual/blob/main/README.md)) | 直接在 GitHub 网页上阅读，可搜索、可跳转，手机上也能看 |
 | **Word** | [`D55-HeadUnit-Root-Manual.docx`](./D55-HeadUnit-Root-Manual.docx)（约 33 KB） | 排版更完整、代码块有底纹、适合打印或离线保存 |
 
 两份内容完全一致：Markdown 由 Word 版逐段转换而来，列表条目、代码块、表格数量均已对账核对。
