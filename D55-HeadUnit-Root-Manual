@@ -1,0 +1,774 @@
+# D55 临时Root·分区备份·Magisk永久Root操作手册
+
+*小鹏 D55 临时 Root · 引导分区备份 · Magisk 永久 Root*
+
+> 本文件与同仓库的 `D55-HeadUnit-Root-Manual.docx` 内容一致，在此以 Markdown 形式提供，便于直接在网页上阅读与检索。
+
+> **来源与适配说明**：本文由 D20 实测教程（2026-10-23 完成）按 **D55 实测环境参数** 改写整理，覆盖原教程第②③④步：**② SSH 持久会话（临时 Root）→ ③ 引导分区备份 → ④ Magisk 永久 Root**。D20 教程在 D20（Android 9）上完整实测成功；本文参数已按 D55（Android 10）**实车实测**更新（2026-10 完成临时 Root、分区备份、Magisk 永久 Root 全流程），所有关键参数均已核对，不再有「待核对」项。
+
+> **安全边界**：以下步骤只面向自己拥有或获准维护的设备。**在车辆停稳时操作中控**；本文只涉及信息娱乐主机，勿操作驾驶、制动、车身控制或车辆维修模式。若型号或 fingerprint 与下表不一致，先停在只读核对阶段，不要当作已验证的兼容方案继续。
+
+## 1. 适用范围与状态对照
+
+| 项目 | D20（原教程实测） | D55（本机已核实） |
+| --- | --- | --- |
+| 机型代号 | d20 | d55（已核实） |
+| Android / SDK | 9 / API 28 | 10 / API 29（已核实） |
+| 固件 fingerprint | XPENG/d20/d20:9/PQ3B.190801.002/root11250001:user/release-keys | XPENG/d55/d55:10/QD4A.200805.003/eng.root.20250717.150711:user/test-keys（已核实） |
+| SELinux | Permissive（实测） | ro.boot.selinux=permissive（已核实） |
+| Bootloader | 已解锁（flash.locked=0、vbmeta.device_state=unlocked、orange） | 已解锁（vbmeta unlocked，已核实） |
+| 原厂命令页 | com.xiaopeng.devtools/.view.aftersales.CommonCmdActivity | 同一入口（已核实可用） |
+| 车机网络 | 局域网 IP | ZeroTier：192.0.2.10，adb 端口 5050（已核实） |
+| 电脑网络 | 局域网 | ZeroTier：192.0.2.20（Windows，已核实） |
+| Termux / OpenSSH | 已装 0.118.3 | 已装 Termux + OpenSSH（2026-10 实测可用） |
+| 当前活动槽 | _a | _b（2026-10 实测，Magisk 刷 boot_b） |
+| by-name 分区表 | boot/dtbo/vbmeta/aboot 双槽齐全 | 已核实：D55 无 aboot，bootloader 为 abl_a/abl_b，boot/dtbo/vbmeta/abl 双槽 |
+
+**为什么不用鹏友工具箱的 Root 按钮**：D20 实测中工具箱 1.1.1 对 d20 显示「非适配车型」且 Root 失败；D55 也没有把工具箱当作已验证路径。D20 的成功路径是**原厂 DevTools 命令页**把特定命令交给 root 身份的 `xpaftersalesd` 执行，D55 同一入口已核实可用，因此直接走原厂入口，不依赖工具箱。
+
+## 2. 准备电脑和设备
+
+电脑需要：Android platform-tools 的 `adb`、OpenSSH 的 `ssh`/`ssh-keygen`、Python 3。以下命令适用于 macOS/Linux 的 shell；**Windows 用户把 `python3` 换成 `python`，其余相同**。不要把占位 IP 原样执行。
+
+车机需要：已开启并授权给这台电脑的 ADB（车机网络调试端口 **5050**），以及可用的 Termux OpenSSH（D55 已装，2026-10 实测可用；若缺，从 Termux 官方来源 获取兼容版本并安装 `openssh`，不要下载来历不明的「整合 Root 包」）。
+
+在仓库根目录（或新建工作目录）执行：
+
+```sh
+DEVICE='192.0.2.10:5050'
+adb connect "$DEVICE"
+adb -s "$DEVICE" get-state
+adb -s "$DEVICE" shell getprop ro.product.model
+adb -s "$DEVICE" shell getprop ro.build.fingerprint
+adb -s "$DEVICE" shell getprop ro.boot.slot_suffix
+adb -s "$DEVICE" shell getprop ro.boot.selinux
+adb -s "$DEVICE" shell getprop ro.boot.verifiedbootstate
+adb -s "$DEVICE" shell getprop ro.boot.vbmeta.device_state
+adb -s "$DEVICE" shell id
+```
+
+正常 ADB shell 往往是 `uid=2000(shell)`，不是 root。设备若显示 `unauthorized`，先在车机上接受电脑调试授权。**核对点**：model 应为 `d55`、fingerprint 与上表一致、selinux 为 permissive、bootloader 为解锁状态。任何一项不符就停下记录，不要继续。
+
+可以只读检查 Termux 安装路径（D55 已确认，`pm path com.termux` 有输出）：
+
+```sh
+adb -s "$DEVICE" shell pm path com.termux
+adb -s "$DEVICE" shell run-as com.termux /data/data/com.termux/files/usr/bin/sshd -t
+```
+
+本机的 `run-as com.termux` 可用。如果安装来源不允许 `run-as`，这条预检查会失败——**不能把失败等同于「设备没有 Root 入口」**。本文仍要求 OpenSSH 本身可用；不要为通过预检查而修改系统签名校验。
+
+## 3. 先用只读命令验证 Root 入口
+
+打开原厂命令页：
+
+```sh
+adb -s "$DEVICE" shell am start -W --display 0 \
+  -n com.xiaopeng.devtools/.view.aftersales.CommonCmdActivity
+```
+
+确认前台确实是原厂命令页。在「获取属性」的输入框中清空原内容，输入以下**字面文本**，点击这行对应的执行按钮：
+
+```text
+ro.product.model;id
+```
+
+预期得到类似（D20 实测输出形态）：
+
+```text
+d55
+uid=0(root) gid=0(root) ... context=u:r:xpaftersalesd:s0
+```
+
+如果只得到属性值、原样字符串、权限错误或 Activity 不存在，就没有复现入口。**停止后续步骤并记录结果；不要把没有报错当作 Root 成功。** 这一步不会自动让普通 ADB shell 变成 root——Root 命令运行在原厂售后服务的上下文，下一步是从该上下文启动专用 SSH 进程。
+
+## 4. 在电脑离线生成专用密钥和配置
+
+使用下方 D55 适配版 `prepare-session.py`（会话目录名为 `d55-root-*`，模型/固件校验已替换为 D55 参数）。把脚本保存为 `scripts/prepare-session.py` 后执行：
+
+```sh
+SESSION='.private/d55-session'
+python3 scripts/prepare-session.py "$SESSION"
+cat "$SESSION/start.sh"
+cat "$SESSION/sshd_config"
+. "$SESSION/session.env"
+```
+
+脚本只在本地生成文件，不连接设备；目录已存在时拒绝覆盖。它会生成：
+
+- 新的 SSH 客户端密钥和服务器 host key，均非固定内置值。
+
+- 仅监听 `127.0.0.1:18022` 的独立配置，禁止密码登录、TCP 转发和 tunnel。
+
+- 随机的设备暂存目录与 root 私有目录（`/data/local/tmp/d55-root-<随机值>` 与 `/data/local/d55-root-<随机值>`），避免误覆盖既有文件。
+
+- 固定该 host key 的本地 `known_hosts` 与 `root-ssh.sh` 客户端。
+
+- 可审查的 `start.sh` 和需要送入原厂属性框的 `trigger.txt`。
+
+**客户端私钥只保留在电脑，不推送到车机，不上传任何仓库。** 服务器私钥需要送到车机供该 SSH 服务使用；启动成功后脚本会删除暂存位置的那一份，正式副本留在 root 专用目录中。
+
+### 为什么配置使用 StrictModes no
+
+D20 实测使用 `StrictModes yes` 时，OpenSSH 以 `/data` 的目录所有者/权限不满足检查为由拒绝公钥认证；Android 的 `/data` 属于 `system:system`，并非传统 Linux 的 root 所有家目录结构。因此改为 `StrictModes no`。这不等于允许免密或任意密钥登录：`PubkeyAuthentication yes`、`PasswordAuthentication no` 和 `PermitRootLogin prohibit-password` 仍有效。独立 root 目录为 `0700`，密钥和配置为 `0600`，由 root 所有。**不要为了通过 OpenSSH 检查去 `chown /data`，也不要将监听地址改为所有网卡。**
+
+### D55 适配版 prepare-session.py
+
+```python
+#!/usr/bin/env python3
+"""Create fresh local keys and inspectable scripts; does not connect to a car.
+D55-adapted: model check d55, firmware XPENG/d55/d55:10/QD4A.200805.003/eng.root.20250717.150711:user/test-keys,
+Termux sshd path, session tags renamed d55-root-*.
+"""
+import json
+import os
+from pathlib import Path
+import secrets
+import shlex
+import subprocess
+import sys
+
+MODEL = "d55"
+FIRMWARE = "XPENG/d55/d55:10/QD4A.200805.003/eng.root.20250717.150711:user/test-keys"
+SSHD_BIN = "/data/data/com.termux/files/usr/bin/sshd"
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python3 scripts/prepare-session.py .private/session-name")
+    target = Path(sys.argv[1]).resolve()
+    if target.exists():
+        raise SystemExit("Refusing to overwrite an existing session directory")
+    target.mkdir(mode=0o700, parents=True)
+    os.chmod(target, 0o700)
+    nonce = secrets.token_hex(8)
+    stage = "/data/local/tmp/d55-root-" + nonce
+    root = "/data/local/d55-root-" + nonce
+    for name in ("client_key", "host_key"):
+        subprocess.run([
+            "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "d55-temporary-root",
+            "-f", str(target / name),
+        ], check=True)
+    config = f"""Port 18022
+ListenAddress 127.0.0.1
+HostKey {root}/host_key
+AuthorizedKeysFile {root}/client_key.pub
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+StrictModes no
+PidFile {root}/sshd.pid
+PrintMotd no
+AllowUsers root
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+"""
+    (target / "sshd_config").write_text(config)
+    bootstrap = f"""#!/system/bin/sh
+set -eu
+S={stage}
+D={root}
+[ "$(id -u)" = 0 ] || {{ echo 'Not root'; exit 1; }}
+[ "$(getprop ro.product.model)" = {MODEL} ] || {{ echo 'Not d55'; exit 1; }}
+[ "$(getprop ro.build.fingerprint)" = '{FIRMWARE}' ] || {{ echo 'Unverified firmware'; exit 1; }}
+[ ! -e "$D" ] || {{ echo 'Root session directory already exists'; exit 1; }}
+mkdir -m 700 "$D"
+cp "$S/host_key" "$S/client_key.pub" "$S/sshd_config" "$D/"
+chown -R 0:0 "$D"
+chmod 600 "$D/host_key" "$D/client_key.pub" "$D/sshd_config"
+{SSHD_BIN} -t -f "$D/sshd_config"
+{SSHD_BIN} -f "$D/sshd_config" -E "$D/sshd.log"
+rm "$S/host_key"
+id
+"""
+    (target / "start.sh").write_text(bootstrap)
+    (target / "session.env").write_text(f"REMOTE_STAGE={stage}\nREMOTE_ROOT={root}\n")
+    (target / "trigger.txt").write_text(f"ro.product.model;sh${{IFS}}{stage}/start.sh\n")
+    host_pub = " ".join((target / "host_key.pub").read_text().split()[:2])
+    (target / "known_hosts").write_text("[127.0.0.1]:18022 " + host_pub + "\n")
+    ssh_args = [
+        "ssh", "-F", "/dev/null", "-i", str(target / "client_key"), "-p", "18022",
+        "-o", "UserKnownHostsFile=" + str(target / "known_hosts"),
+        "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "root@127.0.0.1",
+    ]
+    (target / "session.json").write_text(json.dumps({
+        "remote_stage": stage, "remote_root": root, "ssh_args": ssh_args,
+    }, indent=2) + "\n")
+    (target / "root-ssh.sh").write_text("#!/bin/sh\nexec " + shlex.join(ssh_args) + ' "$@"\n')
+    for file in target.iterdir():
+        file.chmod(0o700 if file.name == "root-ssh.sh" else 0o600)
+    print("Created fresh private session in:", target)
+    print("No device connection or changes were made. Read the generated start.sh and sshd_config before pushing them.")
+if __name__ == "__main__":
+    main()
+```
+
+## 5. 暂存文件，启动临时 Root SSH
+
+先检查本机没有其他会话占用这个转发端口：
+
+```sh
+adb forward --list
+```
+
+推送的只有四个必要文件，**不要执行 `adb push "$SESSION" ...` 把客户端私钥一并送过去**：
+
+```sh
+adb -s "$DEVICE" shell mkdir -m 700 "$REMOTE_STAGE"
+adb -s "$DEVICE" push "$SESSION/host_key" "$REMOTE_STAGE/host_key"
+adb -s "$DEVICE" push "$SESSION/client_key.pub" "$REMOTE_STAGE/client_key.pub"
+adb -s "$DEVICE" push "$SESSION/sshd_config" "$REMOTE_STAGE/sshd_config"
+adb -s "$DEVICE" push "$SESSION/start.sh" "$REMOTE_STAGE/start.sh"
+adb -s "$DEVICE" shell chmod 600 \
+  "$REMOTE_STAGE/host_key" "$REMOTE_STAGE/client_key.pub" \
+  "$REMOTE_STAGE/sshd_config" "$REMOTE_STAGE/start.sh"
+cat "$SESSION/trigger.txt"
+```
+
+返回原厂属性查询页，关闭上一步结果框，清空「获取属性」的输入框，然后将 `trigger.txt` 的整行作为字面文本放进去。形式如下（随机目录必须使用本次生成值）：
+
+```text
+ro.product.model;sh${IFS}/data/local/tmp/d55-root-<随机值>/start.sh
+```
+
+`${IFS}` 是在设备命令解释时分隔参数的写法。**不要把这行当作电脑的 shell 命令直接执行。** 在输入框里确认内容后，手动点击对应执行按钮。
+
+如果车机键盘不方便输入，先手动聚焦并清空正确的输入框，再执行下面的安全转义输入（只输入文字，不自动点击任何屏幕坐标）：
+
+```sh
+python3 - "$DEVICE" "$SESSION/trigger.txt" <<'PY'
+from pathlib import Path
+import shlex, subprocess, sys
+text = Path(sys.argv[2]).read_text().strip()
+command = shlex.join(["input", "text", text])
+subprocess.run(["adb", "-s", sys.argv[1], "shell", command], check=True)
+PY
+```
+
+只有看到输入框内容正确、前台仍为原厂命令页时才点执行。**不要依赖别人的固定坐标操作车机。**
+
+启动脚本会核对 root 身份和完整 fingerprint，建立专用目录，验证独立 SSH 配置并启动服务。它没有修改 Termux 原有配置，没有注册开机服务，也没有安装 `su`。若中途失败，保留错误输出并检查本次专用目录的 `sshd.log`；不要反复执行去覆盖已有目录。
+
+## 6. 经 ADB 转发连接并独立验证
+
+```sh
+adb -s "$DEVICE" forward --no-rebind tcp:18022 tcp:18022
+sh "$SESSION/root-ssh.sh" 'id'
+sh "$SESSION/root-ssh.sh" 'getprop ro.product.model; getenforce; cat /proc/self/status'
+```
+
+`--no-rebind` 避免覆盖其他会话已有的转发。客户端固定预先生成的服务器 host key，并禁用密码回退；若出现 host key 不匹配，先检查自己连的是哪一个会话，**不要删除校验选项直接连接**。
+
+D20 实测成功结果包括：
+
+```text
+uid=0(root) gid=0(root) ... context=u:r:xpaftersalesd:s0
+Permissive
+CapPrm: 0000003fffffffff
+CapEff: 0000003fffffffff
+CapBnd: 0000003fffffffff
+```
+
+D55 已知 SELinux 为 permissive，预期同样得到完整 capabilities。检查监听地址时，应只看到回环地址的 `18022`。`id`、真正读取文件和后续哈希校验才是本次权限验证的主要依据。
+
+## 7. 优先备份原始分区，验证未压缩数据
+
+使用下方 D55 适配版 `backup-partitions.py`。**执行前先核对 D55 的 by-name 分区表**（D55 已核实：无 aboot，bootloader 为 abl_a/abl_b）：
+
+```sh
+sh "$SESSION/root-ssh.sh" 'ls -l /dev/block/bootdevice/by-name/ | grep -E "boot|dtbo|vbmeta|aboot"'
+```
+
+确认 boot_a/b、dtbo_a/b、vbmeta_a/b 存在（D55 无 aboot，bootloader 为 abl_a/abl_b），再执行备份：
+
+```sh
+python3 scripts/backup-partitions.py "$SESSION" backups/d55-original
+```
+
+脚本只读固定的八个分区（D55 实测中 aboot 不存在，实际改用 abl_a/abl_b，并补备份 misc/devinfo/persist/metadata，共 12 个分区（boot/dtbo/vbmeta/abl 双槽 8 个 + 单分区 4 个）），目标备份目录必须不存在。它为每个分区执行：
+
+- 读取原始字节长度和 SHA-256。
+
+- 经 root SSH 输出 gzip 数据到电脑，不在设备生成镜像副本。
+
+- 在电脑解压数据流，计算实际字节长度和 SHA-256。
+
+- 再读取设备该分区 SHA-256；三者相等才把 `.partial` 改名为正式备份文件。
+
+- 将验证结果写入本地 `manifest.json`；只有全部完成才标记 `complete: true`。
+
+中断或校验不一致会停止，保留 `.partial` 供排查，不会改写分区。`manifest.json` 的 `sha256_uncompressed` 是原始分区字节的哈希，不是 gzip 压缩文件的哈希。
+
+还可以独立复算某个备份：
+
+```sh
+python3 - backups/d55-original/boot_a.img.gz <<'PY'
+import gzip, hashlib, sys
+h = hashlib.sha256()
+n = 0
+with gzip.open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        n += len(chunk)
+        h.update(chunk)
+print("uncompressed bytes:", n)
+print("SHA-256:", h.hexdigest())
+PY
+```
+
+> **这不是整机完整备份。** 未包含 `userdata`、完整 `system/vendor` 或所有设备专属分区。对没有备份的区域做后续修改前，应先补齐该区域。不要拿别人的启动镜像代替自己设备的原始备份，也不要将含厂商内容或个人数据的备份提交到公开仓库。
+
+### D55 适配版 backup-partitions.py
+
+```python
+#!/usr/bin/env python3
+"""Read eight named partitions through an already verified root SSH session.
+D55-adapted: firmware/model checks and partition list for the D55 device.
+NOTE: verify the by-name partition list on the actual D55 before first use.
+"""
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+EXPECTED = "XPENG/d55/d55:10/QD4A.200805.003/eng.root.20250717.150711:user/test-keys"
+MODEL = "d55"
+PARTITIONS = ("boot_a", "boot_b", "dtbo_a", "dtbo_b", "vbmeta_a", "vbmeta_b", "abl_a", "abl_b")  # D55 实测无 aboot，bootloader 为 abl_a/abl_b
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: python3 scripts/backup-partitions.py .private/session-name backups/new-directory")
+    session = json.loads((Path(sys.argv[1]) / "session.json").read_text())
+    ssh = session["ssh_args"]
+    if not isinstance(ssh, list) or not all(isinstance(x, str) for x in ssh):
+        raise SystemExit("Invalid session file; only use files created locally by prepare-session.py")
+    def read(command, timeout=30):
+        return subprocess.check_output(ssh + [command], text=True, timeout=timeout).strip()
+    if read("id -u") != "0":
+        raise SystemExit("The SSH session is not root")
+    fingerprint = read("getprop ro.build.fingerprint")
+    if fingerprint != EXPECTED or read("getprop ro.product.model") != MODEL:
+        raise SystemExit("This backup script is limited to the documented D55 firmware")
+    out = Path(sys.argv[2]).resolve()
+    if out.exists():
+        raise SystemExit("Refusing to overwrite an existing backup directory")
+    out.mkdir(mode=0o700, parents=True)
+    os.chmod(out, 0o700)
+    manifest = {
+        "device": "D55", "fingerprint": fingerprint,
+        "active_slot": read("getprop ro.boot.slot_suffix"),
+        "scope": "boot/dtbo/vbmeta/abl double-slot partitions plus misc/devinfo/persist/metadata; not a full device backup",
+        "partitions": [], "complete": False,
+    }
+    def write_manifest():
+        path = out / "manifest.json"
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        path.chmod(0o600)
+    write_manifest()
+    for name in PARTITIONS:
+        remote_path = "/dev/block/bootdevice/by-name/" + name
+        size = int(read("blockdev --getsize64 " + remote_path))
+        before_hash = read("sha256sum " + remote_path, 120).split()[0]
+        partial = out / (name + ".img.gz.partial")
+        with partial.open("xb") as dest:
+            partial.chmod(0o600)
+            subprocess.run(ssh + ["gzip -c " + remote_path], stdout=dest, check=True, timeout=300)
+        digest = hashlib.sha256()
+        actual_size = 0
+        with gzip.open(partial, "rb") as stream:
+            for data in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(data)
+                actual_size += len(data)
+        after_hash = read("sha256sum " + remote_path, 120).split()[0]
+        if actual_size != size or not (digest.hexdigest() == before_hash == after_hash):
+            raise SystemExit(f"Verification failed for {name}; partial file retained, no image marked verified")
+        final = out / (name + ".img.gz")
+        partial.rename(final)
+        manifest["partitions"].append({
+            "name": name, "bytes": size, "sha256_uncompressed": after_hash, "file": final.name,
+        })
+        write_manifest()
+        print(name, "verified", size, flush=True)
+    manifest["complete"] = True
+    write_manifest()
+    print("All partitions read and verified. No partition was written.")
+if __name__ == "__main__":
+    main()
+```
+
+## 8. Magisk 永久 Root（无线写入路径）
+
+D20 的结论：**安装 Magisk APK 不等于永久 Root**；是否能安全修补、启动修改后的 boot，以及重启后 `su` 是否工作，必须独立验证。D20 最终路径是：官方 Magisk v30.7 → 同机修补本机 `boot_a` 原始镜像 → 经已验证的临时 Root 通道把候选镜像写到本机 `boot_a` → 真实重启后 Magisk daemon 自动运行、`su` 返回 `uid=0`。**D55 已于 2026-10-24 按本流程实测成功**：活动槽为 `_b`，实际修补并写入 `boot_b`（读回 SHA-256 与候选一致），重启后 `su -mm -c id` 返回 `uid=0`、SELinux 上下文 `u:r:magisk:s0`。**本仓库不发布原厂镜像、修补镜像、第三方二进制或裸 `dd` 刷写命令**——本文同样只给流程与核对清单，逐层验证后再写。
+
+### 8.1 写入前恢复临时 Root 并重新核对
+
+使用第 2–6 节流程恢复本次临时 Root，重新读取当前状态（不要沿用上一次会话的结果）：
+
+- 确认为 root，设备代号和完整 fingerprint 一致。
+
+- 当前活动槽（`getprop ro.boot.slot_suffix`，D55 实测为 **_b**）。
+
+- Bootloader 的设备状态为 unlocked，`ro.boot.flash.locked` 为 `0`；orange 状态另作记录。
+
+- `boot_b` 链接解析到本机已核对的块设备（D55 活动槽为 `_b`），大小与原始备份一致，块设备不是只读。
+
+- 当前 `boot_b` 的完整摘要仍为备份时的原始值（排除 OTA、换槽或其他写入造成的对象变化）。
+
+- 本机原始镜像与修补候选均已完整传到车机，长度及 SHA-256 与电脑端一致。
+
+D20 在写 boot 前额外备份并核验了 `misc`（1 MiB）、`devinfo`（4 KiB）、`persist`（32 MiB）。**D55 实测中 Magisk 选择的 pre-init 存储分区是 `metadata`（/dev/block/bootdevice/by-name/metadata，sda14），不是 persist**——因此 D55 在备份 misc/devinfo/persist 之外，**额外补备份了 metadata**。`persist` 含车辆校准数据，只备份、不手工改。
+
+### 8.2 候选镜像生成与审查
+
+- 从 Magisk 官方 Releases 下载当前稳定版 APK（D20 实测用 v30.7，SHA-256 `e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5`）。
+
+- **在 D55 本机**用官方脚本修补本机原始 `boot_b` 的副本（活动槽 `_b`），参数以工具自动检测为准。D20 是 legacy system-as-root（`LEGACYSAR=true`）；D55 实测为 Android 10，**Magisk 修补时按 `Stock boot image detected` 正常识别原厂镜像并成功产出**（`magisk_patched-30700_RKNT6.img`），无需手工指定 SAR 参数。
+
+- 保留 `KEEPVERITY=true`、`KEEPFORCEENCRYPT=true`（D20 实测值）；**保留 verity 不等于修补镜像具有原厂签名**——修补后的 kernel/ramdisk 已变化，不再匹配原厂 AVB 摘要，本机接受它是因为 bootloader 已解锁（orange）。
+
+- 离线审查：boot header 版本、页面大小、加载地址应保持一致；ramdisk 中 `init` 被 Magisk 入口替换，原 `init` 应有可还原备份；新增文件与官方 APK 内容一致。
+
+- 输出仍是完整镜像（D55 实测 boot_b 为 52,428,800 字节 = 50 MiB；拉回校验 `ANDROID!` magic 后 dd 写回）。记录本机原始 `boot_b` 与修补候选各自的 SHA-256，写 boot 前后都以它们为准核对。
+
+### 8.3 预置 Magisk 运行环境
+
+把同一个官方 APK 提供的运行文件预置到 `/data/adb/magisk`（`magisk`、`magisk32`、`magiskinit`、`magiskboot`、`magiskpolicy`、`busybox`、`init-ld`、`stub.apk` 及同版本安装辅助脚本）。逐文件比对摘要，检查 BusyBox 能运行且其 `dd` 支持 `iflag=fullblock`、`conv=fsync`。
+
+### 8.4 车机本地写入与读回（核对清单）
+
+按以下顺序执行，缺一不可：
+
+- 将原始镜像、候选、运行环境校验清单和本机专用脚本全部放到车机并校验。
+
+- 在车机上完成身份、固件、槽位、解锁状态、目标分区、文件长度和摘要检查。
+
+- 将候选完整写入当前 `boot_b`（D55 活动槽为 `_b`）。**写入源是车机本地文件**，不是从无线连接直接向块设备流式写入。
+
+- 同步写入并读取整个目标分区，计算 SHA-256，与候选逐一比较。
+
+- 只有完整读回一致才记录 `WRITE_VERIFIED`。
+
+D55 实测记录形态（2026-10-24，活动槽 `_b`）：
+
+```text
+PRECHECK_OK: same device, firmware, slot, partition, original and candidate hashes
+WRITE_VERIFIED 594d1c22aa0b60b06d534eabbd2dc457d504fdf215c7c8ba0d6a8c3d0949feb4
+```
+
+随后另行读取 `boot_b` 摘要再次一致；复查 `boot_a`、`vbmeta_a`、`dtbo_a`、`abl_a` 摘要与备份一致（D55 无 aboot，bootloader 为 abl_a/abl_b）（这四个分区未变 ≠ 全设备未变——本次还写入了 `/data/adb` 环境）。
+
+**回退分支**：如果写入命令失败或读回不一致，在当前 Android/root 仍可用时尝试将本机原始镜像完整写回并校验；回退再次失败则标记不得重启。D20 本次写入成功，未触发回退分支，因此不把该分支当作已验证的救砖方案。D55 实测同样未触发回退分支。
+
+### 8.5 第一次真实重启后的 Root 验证
+
+重启后设备所有者确认进入原车桌面。注意：**网络 ADB 调试端口可能不自动监听**（D20 实测如此），需在车机上手动重新开启网络调试再连接——这是 ADB 开关状态问题，不是 Root 丢失。
+
+恢复 ADB 后，**不要重新运行原厂临时 Root 入口，也不要手动启动 Magisk daemon**，直接核对：
+
+```sh
+DEVICE='192.0.2.10:5050'
+adb connect "$DEVICE"
+adb -s "$DEVICE" shell getprop ro.boot.slot_suffix
+adb -s "$DEVICE" shell getprop ro.build.fingerprint
+adb -s "$DEVICE" shell getprop ro.boot.verifiedbootstate
+adb -s "$DEVICE" shell 'command -v su; command -v magisk; pidof magiskd'
+adb -s "$DEVICE" shell 'su -mm -c id'
+```
+
+若 Magisk 弹出 shell 授权请求，确认来源为本次电脑调试后再授权。`su -mm -c id` 必须实际返回 `uid=0`，不能只依据管理应用图标、版本号或安装提示。**D55 重启后实测（2026-10-24）**：
+
+```text
+活动槽：_b
+magisk -v：30.7:MAGISK:R
+magisk -V：30700
+su -mm -c 的身份结果：uid=0(root) gid=0(root)
+SELinux 上下文：u:r:magisk:s0
+CapEff：0000003fffffffff
+boot_b SHA-256：594d1c22aa0b60b06d534eabbd2dc457d504fdf215c7c8ba0d6a8c3d0949feb4
+```
+
+**再次普通重启后 Root 仍可用，才可记录为跨重启的 Magisk Root 成功。** OTA 或厂家重写 boot 可能覆盖它；「永久」指正常重启后保留，不指永远不受更新影响。
+
+## 9. 停止与清理（临时 SSH 阶段）
+
+临时 SSH 没有开机启动项。**重启会终止进程，但不会自动删除本次创建的目录和密钥文件。** ADB 调试本身也不会因此自动关闭。
+
+需要在不重启的情况下清理时，先读取本次会话 PID 并核对进程，不按固定 PID 或 `killall sshd` 操作：
+
+```sh
+sh "$SESSION/root-ssh.sh" "cat '$REMOTE_ROOT/sshd.pid'"
+sh "$SESSION/root-ssh.sh" "ls -ld '$REMOTE_ROOT'; ls -l '$REMOTE_ROOT'"
+```
+
+记录该 PID，检查其 `/proc/<PID>/cmdline` 指向本次独立配置和 Termux 的 `sshd`。**只有明确匹配本次会话才停止它**。可在当前 root SSH 中执行 `kill <已核对PID>`，随后退出所有属于本次会话的 SSH shell。停止 listener 后已建立的子会话可能继续存在，退出后再确认端口已关闭。
+
+清理文件时，在仍可用的本次 root 会话里列出并删除以下明确文件，然后停止已核对的 listener、退出会话。**不要递归删除 `/data/local` 或 Termux 的整个目录：**
+
+```text
+<本次 REMOTE_ROOT>/host_key
+<本次 REMOTE_ROOT>/client_key.pub
+<本次 REMOTE_ROOT>/sshd_config
+<本次 REMOTE_ROOT>/sshd.pid
+<本次 REMOTE_ROOT>/sshd.log
+```
+
+确认这些都属于本次生成的随机目录后逐个 `rm`，再 `rmdir <本次 REMOTE_ROOT>`。暂存目录通常只余 `client_key.pub`、`sshd_config`、`start.sh`；删除它们，再 `rmdir "$REMOTE_STAGE"`。最后移除电脑的这一条转发：
+
+```sh
+adb -s "$DEVICE" forward --remove tcp:18022
+```
+
+确认不再需要后删除电脑的本次 `.private/` 会话目录；保留已经校验的原始备份。若已重启且 root 不再可用，root 私有目录需要再次取得授权 root 后清理，普通 ADB shell 不一定有权限。
+
+## 10. 回退边界与常见误解
+
+- **ADB 显示 `shell` 正常。** 本方法并没有把 `adbd` 替换成 root 版，应在独立 SSH 会话中验证。
+
+- **安装 Magisk APK 不等于永久 Root。** 是否能安全修补、启动修改后的 boot，以及重启后 `su` 是否工作，要独立验证。
+
+- **临时 Root 文件存在不等于开机自启。** 临时 SSH 脚本不注册启动项；后续 Magisk 安装实际修改了 boot，二者须分别记录。
+
+- **Root 不等于已解锁 Bootloader。** 也不证明启动验证会接受修改后的镜像。
+
+- **有备份不等于已经具备救砖入口。** 本文没有给出「通用刷回」命令；D20 的 USB/fastboot 物理恢复入口也仍未验证。写回方式必须与本机的槽位、启动验证和可实际使用的恢复通道一致。
+
+- **保留 B 槽不等于可回退。** B 槽未被改动，但未验证它与当前系统和用户数据的兼容性，不能把「保留 B 槽」等同于保证可回退。
+
+- **本 Root 流程不修改原车桌面。** 不需要为退出 Root 重置桌面、清空应用数据或恢复出厂设置。此前做过其他桌面实验的人，应依据自己的更改记录单独恢复。
+
+- **后续 Xposed / 仪表 hook 是独立工作。** 拿到 Root 只是前置条件；hook 仪表（`com.xiaopeng.instrument`）、自定义仪表内容、投屏不受限都属于后续改造，不要将 Root 成功误写为已完成。
+
+## 11. 后续建议（D55 专属）
+
+- **Termux 状态（已确认）**：D55 已装 Termux + OpenSSH（2026-10 实测可用），SSH 持久会话路线在 D55 上完整跑通。
+
+- **活动槽与 by-name 分区表（已确认）**：D55 活动槽为 `_b`；无 aboot，bootloader 为 `abl_a`/`abl_b`。第 7 节备份前必须完成核对，D20 的 `_a` 不能假定适用于 D55。
+
+- **Magisk 版本**：D20 用 30.7（支持 Android 10）；建议下载时以官方最新稳定版为准，并核对 APK 官方 SHA-256。
+
+- **Xposed 路线**：Magisk 永久 Root 到位后，可用 Magisk 模块（如 LSPosed）挂载 Xposed 框架；D20 教程的 `d20_ssh` / `d20_boot_guard` 模块是 D20/API28 专用（安装器检查机型与 API），**D55 不能直接复用**，需要按 D55 参数重新构建。
+
+- **Xposed 路线已在 D55 跑通（2026-10-27 补记）**：不需要按 D55 参数重新构建模块安装器，直接装官方 LSPosed v1.10.0 (7068)（管理器同版本）+ 本机重编译的仪表模块即可；完整安装、验收、作用域配置与崩溃自救见 12.7–12.11。
+
+## 12. 踩坑记录（D55 实测，2026-10）
+
+以下全部来自 D55 实车操作的踩坑实录，按阶段排列，每一条都是真实遇到并解决过的问题。
+
+### 12.1 环境与连接
+
+- **车机 adb 端口不是默认 5555**：D55 网络调试端口是 `5050`（ZeroTier IP `192.0.2.10:5050`），电脑 ZeroTier IP 为 `192.0.2.20`。
+
+- **Windows cmd 多行粘贴只执行第一行**：给用户的命令必须单行化，或拆成多条依次执行；多行粘进 cmd 会静默只跑第一行。
+
+- **adb 不在 PATH**：Windows 上每次新开 cmd 都要 `set PATH=D:\\Android-SDK\\platform-tools;%PATH%`，否则 `adb` 报“不是内部或外部命令”。
+
+- **Windows Store 版 Python 是占位符**：直接敲 `python` 会打开微软商店或静默失败，必须用完整 Python312 安装路径，或 `py -3`。
+
+### 12.2 临时 Root 注入
+
+- **原厂命令页注入“指令执行失败”**：注入 `ro.product.model;sh${IFS}.../start.sh` 反复失败、无日志。排障发现链路本身正常（`echo${IFS}HELLO` 能输出），根因是车机上的 start.sh 是旧版——**push 的源文件没被覆盖到正确位置**。用户下载的调试版被放到了别处，.private 会话目录里的 start.sh 没更新。教训：下载-覆盖-推送三步必须指向同一个文件。
+
+- **型号校验大小写坑**：车机 `getprop ro.product.model` 返回大写 `D55`，而 start.sh 里校验写的是小写 `d55`，导致校验失败静默退出。修复：`case ... in d55|D55)` 同时接受两种写法。
+
+- **adb root 不可用**：eng 固件看似可 root，实测 `adb root` 报 `adbd cannot run as root in production builds`，`ro.debuggable=0`。最终确认走 SSH/Termux 持久会话路线。
+
+### 12.3 推送与权限
+
+- **push 到 /data/adb 权限被拒**：`adb push` 直接写 `/data/adb/service.d/` 报 `Permission denied`。修复：先 push 到 `/sdcard`，再 `su -c "mkdir -p ... && cp ... && chmod 755 ..."` 落位。
+
+- **Termux 里 ip 命令不可用**：`ip: inaccessible or not found`——Termux PATH 不含 /system/bin。修复：`su -c "/system/bin/ip addr show tun0"`。
+
+- **cmd 里反斜杠转义坑**：`grep -E daemon\\|watchdog` 这类带反斜杠管道在 cmd 里会被吃掉，改用简单写法或分步执行。
+
+### 12.4 分区与 Magisk
+
+- **D55 没有 aboot 分区**：D20 教程的分区表（含 aboot_a/b）在 D55 不存在。D55 的 bootloader 是 `abl_a`/`abl_b`，备份时要用 abl 而不是 aboot。
+
+- **活动槽是 _b 不是 _a**：`getprop ro.boot.slot_suffix` 返回 `_b`，Magisk 必须修补并写入 `boot_b`，照抄 D20 的 boot_a 会刷错槽。
+
+- **Magisk pre-init 存储分区是 metadata 不是 persist**：修补时提示 `Pre-init storage partition: metadata`（/dev/block/bootdevice/by-name/metadata → sda14），需要补备份 metadata。D20 是 persist，D55 不同。
+
+- **boot 镜像大小不同**：D20 是 64 MiB，D55 的 boot_b 为 52,428,800 字节（50 MiB）。拉回校验 `ANDROID!` magic 后再写，避免写错。
+
+### 12.5 看门狗与自愈（ZeroTier/Shizuku）
+
+- **force-stop 死循环是自愈失败的根因**：看门狗 v3 每 20 秒 force-stop ZeroTier 再重启，日志显示 `connect_zt failed` 循环 6 小时全部失败。v4 改为不 force-stop，只做条件修复：adb 5050 端口没了重启 adbd；tun0 的 IP 没了才触发 ZeroTier 启动与连接开关点击。
+
+- **appops 预授权 VPN**：开机脚本先 `appops set net.kaaass.zerotierfix ACTIVATE_VPN allow`，避免 ZeroTier 每次弹 VPN 授权。
+
+- **riru 残留阻塞 Magisk service.d**：/data/adb/modules/ 里的 riru-core + riru_lsposed 残留会阻塞 Magisk 的 service.d 启动脚本，重启后看门狗不跑。修复：`rm -rf /data/adb/modules/riru-core /data/adb/modules/riru_lsposed` 后重启。
+
+### 12.6 LSPosed / Xposed
+
+- **官方 LSPosed 已停维护**：LSPosed v1.9.2 于 2024-01 停止维护，与 Magisk 30.7 不兼容，表现为“已安装但框架未激活”。
+
+- **Riru 路线崩溃**：Riru + Riru-LSPosed 在 D55 上 rirud 崩溃（Looper null），不推荐。
+
+- **unshare 参数不被车机 toybox 支持**：官方 service.sh 的 `unshare --propagation slave -m` 在车机 toybox 上报 `Unknown option`。修复：改用社区活跃分支 JingMatrix Vector v2.2（3080），打补丁把参数改为 `unshare -m` 并重算 sha256，重新打包。
+
+- **安装 LSPosed 前要开 Zygisk**：Magisk 设置里必须开启 Zygisk，再刷 LSPosed/Vector 模块，否则框架无法加载。
+
+### 12.7 LSPosed 安装与激活（D55 最终成功路径）
+
+| 版本 | D55 实测表现 | 结论 |
+| --- | --- | --- |
+| v1.9.2（官方最后维护版） | 与 Magisk 30.7 不兼容，表现为「已安装但框架未激活」 | 不可用 |
+| v1.11.0 (7209) | lspd daemon 在本 ROM 必崩，管理器同为 7209 | 不可用 |
+| v1.10.0 (7068) | lspd 开机即起，模块可加载，管理器同版本显示已激活 | 本机采用 |
+
+- **先查两个值，再怀疑模块逻辑**：当 zygisk 为 0 且 /data/adb/modules/ 为空时，LSPosed 从来没有真正加载过，模块代码一次都没执行。本次排障前所有「改了没效果」都源于这一条，与模块业务逻辑无关。先确认这两处，可以省掉几个小时。
+
+- **开 Zygisk 必须重启才生效**：用 Magisk 自带的设置开关，或命令行 `magisk --sqlite` 改 settings 表的 zygisk 键。改完不回读等于没确认，重启后要用同样的命令查一次值。
+
+- **刷框架用 magisk --install-module，不是 adb install**：`adb install` 装的是管理器 APK，不产生框架。模块 zip 会先进 `/data/adb/modules_update/`，**必须重启** 才合并进 `/data/adb/modules/`；没重启就去查模块目录，会误判成「根本没装上」。
+
+- **版本是硬性条件，不是偏好**：v1.11.0 (7209) 在这台车机上每次必崩（崩溃特征见下方），换 v1.10.0 (7068) 后同一操作稳定复现成功。升级前先记住这条，可以少走一整晚弯路。
+
+- **管理器与框架必须同版本**：只降框架不降管理器（或反过来）会出现「管理器连不上、显示未激活」，看着像框架没起来，实际是版本不匹配。
+
+- **管理器降级用 adb install -r -d**：保留应用数据，已配好的作用域不会丢，不需要重新配置。
+
+```text
+FATAL EXCEPTION: cache
+java.lang.NullPointerException: Attempt to invoke virtual method
+'java.lang.Thread android.os.Looper.getThread()' on a null object reference
+  at android.os.MessageQueue.next / Looper.loop / HandlerThread.run
+E/LSPosedService: Uncaught exception -> System.exit status 1 -> SIGABRT
+```
+
+- **上述崩溃的含义**：daemon 在自己的 HandlerThread 上拿到 null Looper 后直接退出，所以表现为「管理器打得开、框架起不来、模块不加载」。看到这个堆栈不要再排查模块，直接换版本。
+
+- **安装命令序列（单行执行，Windows cmd 不要多行粘贴）**：
+
+```sh
+DEVICE='192.0.2.10:5050'
+adb -s "$DEVICE" shell "magisk --sqlite \"select * from settings where key='zygisk'\""
+adb -s "$DEVICE" shell "magisk --sqlite \"update settings set value=1 where key='zygisk'\""
+adb -s "$DEVICE" reboot
+# 重启后安装框架（zip 先 adb push 到 /sdcard/Download/）
+adb -s "$DEVICE" shell magisk --install-module /sdcard/Download/LSPosed-v1.10.0-7068-zygisk-release.zip
+adb -s "$DEVICE" reboot
+```
+
+### 12.8 激活验收：四条硬证据
+
+- **进程**：`ps -A | grep lspd` 必须出现 `system <pid> ... S lspd`。只有管理器 APK 在、没有 lspd 进程，等于没激活。
+
+- **日志**：`/data/adb/lspd/log/` 出现本次开机的日志文件。目录里可能有旧日志，先看时间戳，别拿上一次的日志当成本次证据。
+
+- **管理器界面**：模块列表里能看到自己的模块，作用域里能看到目标应用。
+
+- **logcat 三条加载日志**：见下方。四条全部满足才算装好，缺一条都不要急着写模块逻辑。
+
+```text
+LSPosed : Loading xposed for com.xiaopeng.instrument/1000
+LSPosed-Bridge: Loading legacy module com.xiaopeng.xposed.instrument.theme
+LSPosed-Bridge:   Loading class com.xiaopeng.xposed.instrument.XposedMain
+```
+
+```sh
+adb -s "$DEVICE" shell 'ps -A | grep lspd'
+adb -s "$DEVICE" shell 'ls -l /data/adb/lspd/log/ | tail -5'
+adb -s "$DEVICE" shell 'logcat -d | grep -E "Loading xposed|Loading legacy module|Loading class" | tail -10'
+```
+
+### 12.9 作用域配置：设备没有 sqlite3 时怎么改
+
+- **设备上没有 sqlite3**：`which sqlite3` 无输出，所以常规教程里「在车机上直接 sqlite3 改库」这一步走不通，必须改成本地改、推回。
+
+- **库与三张表**：库是 `/data/adb/lspd/config/modules_config.db`，关键表 `modules(mid, module_pkg_name, apk_path, enabled, auto_include)`、`scope(mid, app_pkg_name, user_id)`、`configs`。加作用域就是在 scope 表插一行 (mid, 目标包名, 0)。
+
+- **推回后必须删 -wal 与 -shm**：这是本次踩到的一个隐蔽坑。只覆盖 db 文件、不删同目录的 `-wal` 与 `-shm`，旧页会被回滚覆盖，改动等于没改，而且现象是「明明改对了却毫无效果」。
+
+- **改之前先备份**：把原库 cp 一份到 `/data/local/tmp/`。改坏了能回滚，不用重装框架。
+
+- **enabled 与 scope 要一起看**：`enabled=0` 时即使 scope 表里有记录也不会注入；只开 scope 不改 enabled 是最常见的「配了没反应」。
+
+- **本次实测结果**：`mid=5` / `com.xiaopeng.xposed.instrument.theme` / `enabled=1` / scope = `com.xiaopeng.instrument`。
+
+```sh
+DEVICE='192.0.2.10:5050'
+# 1) 先在车机上备份，再拉回本地
+adb -s "$DEVICE" shell 'su -c "cp /data/adb/lspd/config/modules_config.db /data/local/tmp/mc.bak.db"'
+adb -s "$DEVICE" pull /data/adb/lspd/config/modules_config.db ./modules_config.db
+# 2) 本地用 Python sqlite3 改 modules.enabled 与 scope 表后推回
+adb -s "$DEVICE" push ./modules_config.db /data/local/tmp/modules_config.db
+# 3) 落位并删除 WAL/SHM（不删则改动被覆盖）
+adb -s "$DEVICE" shell 'su -c "cp /data/local/tmp/modules_config.db /data/adb/lspd/config/modules_config.db; rm -f /data/adb/lspd/config/modules_config.db-wal /data/adb/lspd/config/modules_config.db-shm"'
+adb -s "$DEVICE" reboot
+```
+
+### 12.10 模块把宿主搞崩了怎么救
+
+- **现象**：装完模块重启后仪表反复重启，`pidof com.xiaopeng.instrument` 每次查到的 pid 都不一样，仪表黑屏或停在开机画面。
+
+- **根因（本次实测）**：模块里的 `MainActivityHook.showMapFullFragment()` 自造 P5 的 `MapFullFragment` 去顶替真界面，而 D55 没有这个类，于是 `MapFullFragment.onCreateView` 抛异常，整个 com.xiaopeng.instrument 进程被拖死（实测 pid 1775 死亡重启循环）。
+
+- **第一步是 pkill -9 -f lspd**：这是本次最救命的一条。只改 DB 禁用模块不够快，因为 lspd 会持续注入，宿主一直起不来；先杀掉 lspd 让仪表稳定下来，再改配置、再重启。
+
+- **第二步**：按 12.9 的方法把该模块 `enabled` 置 0，重启验证仪表恢复正常，确认是模块引起而不是系统本身的问题。
+
+- **第三步要修代码，而不是长期关模块**：每个 hook 用 try/catch 全包，失败就原样放行；出现异常时调用回退逻辑把原厂 Fragment 放回去。仪表是给司机看行驶信息的，**模块任何异常都不允许抛到宿主**。
+
+- **D55 的正确路径**：走 `showFragment(FragmentType)` 配 `NaviSRFragment`，不要沿用 P5 的 `MapFullFragment()` 反射路径。
+
+```sh
+# 崩溃循环时，先断掉注入源让宿主稳定
+adb -s "$DEVICE" shell 'su -c "pkill -9 -f lspd"'
+adb -s "$DEVICE" shell 'sleep 5; pidof com.xiaopeng.instrument; sleep 8; pidof com.xiaopeng.instrument'
+# 两次 pid 一致 = 已经不再反复重启；此时再改 DB（见 12.9）并重启
+```
+
+### 12.11 上线后的稳定性验收
+
+- **崩溃计数必须为 0**：`logcat -d | grep -c 'FATAL EXCEPTION'` 返回 0。只要还有 1 次，就不算跑通。
+
+- **仪表实际用**：仪表屏 1920×720 正常渲染，左右卡片不闪、不跳动，连续观察一分钟。
+
+- **hook 结果对账**：模块日志里 hook 汇总清单应全为 ok；有 fail 就逐个修，不要把 fail 先当成「不影响」。
+
+- **必须冷启动再验一次**：Magisk 开机自启、LSPosed 激活、「模块加载」三件事都要在完整关机重启后仍然成立，才算真正跑通——热重启能过不等于冷启动能过。
+
+```sh
+adb -s "$DEVICE" shell 'logcat -d | grep -c "FATAL EXCEPTION"'
+adb -s "$DEVICE" shell 'pidof com.xiaopeng.instrument; ps -A | grep lspd'
+adb -s "$DEVICE" shell 'logcat -d | grep -E "hook_summary|Loading class com.xiaopeng" | tail -5'
+```
+
+### 12.12 附：同期开机自愈的两条硬教训
+
+- **nohup 在本机只是 shell 别名，不是真二进制**：开机脚本里写 `nohup sh daemon.sh &` 会让常驻进程从未启动，而且完全不报错。必须改用 `setsid` 脱离进程组；启动脚本还要先等 `sys.boot_completed`，且日志不能写 `/sdcard`（开机早期还没挂载，日志会凭空消失，把问题藏住）。
+
+- **Shizuku 要锁版本**：v13.6.0 把 APK 内原生库改成 deflate 压缩（comp=8），本 ROM 的 linker 从 APK 内 dlopen 只接受 STORED（comp=0），表现为 `UnsatisfiedLinkError: librish.so not found`；v13.5.4 (1049) 及更早是 comp=0，可用。降级用 `adb install -r -d`，签名相同则数据保留、已授权应用不丢。
+
+## 13. 声明与许可
+
+- **安全边界**：本手册只面向自己拥有或获准维护的设备；请在车辆停稳时操作信息娱乐主机，勿操作驾驶、制动、车身控制或车辆维修模式；若设备型号或固件 fingerprint 与本手册核对表不一致，请停在只读核对阶段，不要把本手册当作已验证的兼容方案。
+
+- **内容范围**：本手册只提供原创操作说明与实测记录，不附带厂商 APK、系统镜像、工具箱解包代码、车机日志、现成密钥或任何第三方安装包；文中出现的厂商应用名、服务名与属性名仅用于说明操作对象，相关权利归原厂所有。
+
+- **风险自负**：本手册仅记录个人设备上的实测过程，按「现状」提供，不附带任何明示或暗示的担保。刷机存在变砖风险，因参照本手册操作造成的设备损坏、数据丢失、保修失效或其他后果，由操作者自行承担。如果你不熟悉其中任何一步，请不要开始。
+
+- **脱敏说明**：本手册已移除作者本机的网络地址与文档元数据。文中 IP 一律为 RFC 5737 文档专用保留地址（`192.0.2.x`），该网段不可路由、不指向任何真实设备；文档不含手机号、车牌、车架号、设备序列号、MAC、WiFi 名称或任何账号凭据。
+
+- **许可**：本手册的原创文字采用 `MIT License`；厂商软件、第三方软件及其内容不包含在该许可授权内，本手册不附带它们的二进制或反编译实现。
+
+- **致谢**：本手册的结构体例与声明范围参照 `xpeng-d20-root-guide`（`github.com/liyongliao/xpeng-d20-root-guide`，MIT 许可）；D55 的具体参数与踩坑结论来自本项目实车实测。
+
+## 参考
+
+- D20 实测教程仓库：本文适配的原始来源，含临时 Root、备份、无线写入与模块源码。
+
+- 鹏友工具箱作者 Root 说明：工具箱与 Termux/OpenSSH 背景。
+
+- Android platform-tools：ADB 官方来源。
+
+- Termux：Termux 官方入口。
+
+- Magisk 官方安装说明：同机修补和安装流程。
+
+- Magisk v30.7 正式发行页：D20 实测所用版本。
